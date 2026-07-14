@@ -42,6 +42,12 @@
   --ship-fast-deck: #d97f2f;
   --sail-fast: #f5a623;
 
+  /* 战斗特效色 */
+  --flash: #ffd97f;
+  --flame: #ff8a4a;
+  --smoke: #6b7684;
+  --foam: rgba(255, 255, 255, 0.92);
+
   /* 尺寸与动效 */
   --radius: 12px;
   --radius-sm: 8px;

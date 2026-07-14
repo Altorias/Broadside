@@ -54,12 +54,60 @@ interface EffectsProps {
   onDone: (key: number) => void;
 }
 
+/** 父元素生命周期时长（子元素各自的动画在 CSS 内定长） */
 const FX_BASE_DUR: Record<Effect['kind'], number> = {
   cannonball: 0, // 用 effect.dur
-  impact: 300,
-  splash: 450,
-  scorePop: 700,
+  muzzle: 420,
+  impact: 560,
+  thud: 460,
+  splash: 500,
+  scorePop: 750,
 };
+
+/** 各特效的子结构：核心/冲击环/烟尘等独立动画 */
+function EffectBody({ kind, text }: { kind: Effect['kind']; text?: string }) {
+  switch (kind) {
+    case 'cannonball':
+      return <span className="ball" />;
+    case 'muzzle':
+      return (
+        <>
+          <span className="mz-flash" />
+          <span className="mz-smoke" />
+        </>
+      );
+    case 'impact':
+      return (
+        <>
+          <span className="imp-core" />
+          <span className="imp-ring" />
+          <span className="imp-smoke is1" />
+          <span className="imp-smoke is2" />
+          <span className="imp-smoke is3" />
+        </>
+      );
+    case 'thud':
+      return (
+        <>
+          <span className="th-ring" />
+          <span className="th-dust td1" />
+          <span className="th-dust td2" />
+          <span className="th-dust td3" />
+        </>
+      );
+    case 'splash':
+      return (
+        <>
+          <span className="sp-ring r1" />
+          <span className="sp-ring r2" />
+          <span className="sp-drop d1" />
+          <span className="sp-drop d2" />
+        </>
+      );
+    case 'scorePop':
+      return <>{text}</>;
+  }
+}
 
 export function EffectsLayer({ effects, onDone }: EffectsProps) {
   return (
@@ -71,6 +119,9 @@ export function EffectsLayer({ effects, onDone }: EffectsProps) {
           '--c': f.c,
           '--r2': f.r2 ?? f.r,
           '--c2': f.c2 ?? f.c,
+          '--ang': f.ang ?? 0,
+          // 子元素动画的统一起播延迟（CSS 内 calc(var(--fxd) + 各自偏移)）
+          '--fxd': `${(f.delay ?? 0) * ANIM_SCALE}ms`,
           animationDuration: `${dur}ms`,
           animationDelay: `${(f.delay ?? 0) * ANIM_SCALE}ms`,
         } as CSSProperties;
@@ -79,9 +130,12 @@ export function EffectsLayer({ effects, onDone }: EffectsProps) {
             key={f.key}
             className={`fx fx-${f.kind}`}
             style={style}
-            onAnimationEnd={() => onDone(f.key)}
+            onAnimationEnd={(ev) => {
+              // 只在父元素自身的生命周期动画结束时移除（子元素动画冒泡忽略）
+              if (ev.target === ev.currentTarget) onDone(f.key);
+            }}
           >
-            {f.kind === 'scorePop' ? f.text : null}
+            <EffectBody kind={f.kind} text={f.text} />
           </div>
         );
       })}

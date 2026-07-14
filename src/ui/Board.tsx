@@ -63,8 +63,10 @@ export function Board({ game, visual, busy, onAct, onSkip, onRemoveEffect }: Pro
       />
       <RangeLayer
         width={w}
+        origin={game.player.pos}
         currentRays={currentRays}
         previewRays={previewRays}
+        previewOrigin={previewRays ? hovered : null}
         moveTargets={[...legalTargets.keys()]}
         busy={busy}
       />

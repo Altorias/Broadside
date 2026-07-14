@@ -4,7 +4,7 @@
 // 播放完 syncFrom(game) 强制对齐自愈；generationRef 代际计数保证取消安全。
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { DIR_ANGLE, colOf, dirFromTo, rowOf } from '../engine/geometry';
+import { DIR_ANGLE, colOf, dirFromTo, portOf, rowOf, starboardOf } from '../engine/geometry';
 import { startLevel } from '../engine/generator';
 import { resolveTurn } from '../engine/rules';
 import type { Action, GameEvent, GameState, ShipKind, SinkCause } from '../engine/types';
@@ -20,8 +20,8 @@ const DUR = {
   playerMove: 240,
   teleport: 420,
   volleyPerCell: 80,
-  volleyTail: 320, // 命中特效余量
-  volleyMiss: 120,
+  volleyTail: 380, // 命中特效余量
+  volleyMiss: 300, // 落点水花/闷响余量
   enemyMove: 240,
   sink: 380,
   hit: 360,
@@ -44,7 +44,7 @@ export interface VisualShip {
 
 export interface Effect {
   key: number;
-  kind: 'cannonball' | 'impact' | 'splash' | 'scorePop';
+  kind: 'cannonball' | 'impact' | 'splash' | 'scorePop' | 'muzzle' | 'thud';
   r: number;
   c: number;
   /** cannonball 终点 */
@@ -54,6 +54,8 @@ export interface Effect {
   dur?: number;
   delay?: number;
   text?: string;
+  /** 朝向角（度）：炮口焰/弹丸拖尾的旋转 */
+  ang?: number;
 }
 
 export interface VisualState {
@@ -264,8 +266,14 @@ export function useGame(initial: GameState) {
         }
         case 'volley': {
           const player = ships.find((s) => s.id === 0)!;
+          // fire 不改变朝向，读最终态 facing 安全（move/fire 互斥）
+          const facing = gameRef.current.player.facing;
           const fx: Effect[] = [];
           for (const ray of beat.rays) {
+            const dir = ray.side === 'port' ? portOf(facing) : starboardOf(facing);
+            const ang = DIR_ANGLE[dir];
+            // 炮口焰：两舷恒有（贴边空放也冒烟）
+            fx.push({ key: nk(), kind: 'muzzle', r: player.row, c: player.col, ang });
             if (ray.cells.length === 0) continue;
             const last = ray.cells[ray.cells.length - 1]!;
             const flight = ray.cells.length * DUR.volleyPerCell;
@@ -277,19 +285,28 @@ export function useGame(initial: GameState) {
               r2: rowOf(last, w),
               c2: colOf(last, w),
               dur: flight,
+              ang,
             });
+            // 落点三分支：命中爆闪 / 被挡闷响扬尘 / 脱靶水花
             if (ray.hitShipId !== undefined) {
               fx.push({ key: nk(), kind: 'impact', r: rowOf(last, w), c: colOf(last, w), delay: flight });
+            } else if (ray.blockedBy) {
+              fx.push({ key: nk(), kind: 'thud', r: rowOf(last, w), c: colOf(last, w), delay: flight });
+            } else {
+              fx.push({ key: nk(), kind: 'splash', r: rowOf(last, w), c: colOf(last, w), delay: flight });
             }
           }
           for (const sk of beat.sunk) {
             ships = ships.map((s) => (s.id === sk.shipId ? { ...s, sinking: sk.cause } : s));
+            // 飘分等命中它的炮弹飞到再弹出
+            const hitRay = beat.rays.find((r) => r.hitShipId === sk.shipId);
             fx.push({
               key: nk(),
               kind: 'scorePop',
               r: rowOf(sk.to, w),
               c: colOf(sk.to, w),
               text: `+${sk.points}`,
+              delay: (hitRay?.cells.length ?? 0) * DUR.volleyPerCell,
             });
           }
           hud = { ...hud, score: hud.score + beat.sunk.reduce((a, e) => a + e.points, 0) };
