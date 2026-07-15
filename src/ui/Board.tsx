@@ -56,7 +56,7 @@ export function Board({ game, visual, busy, onAct, onSkip, onRemoveEffect }: Pro
       style={{ '--cols': w, '--rows': h } as CSSProperties}
     >
       <TerrainLayer
-        terrain={game.terrain}
+        terrain={visual.terrain}
         width={w}
         onCellClick={onCellClick}
         onCellHover={setHovered}

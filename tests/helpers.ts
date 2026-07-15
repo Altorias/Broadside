@@ -2,10 +2,13 @@
 // 字符表：~ 或 . 水 | # 岛 | R 礁 | V 漩涡 | W 残骸
 //         P 玩家（朝向由 opts.facing 指定，默认 N）
 //         1-9 普通海盗（id = 数字）| F/G/H 快速海盗（id = 10/11/12）
+//         B 旗舰（id = 30，hp = opts.flagshipHp ?? 3）
 
 import type {
+  AbilityId,
   Dir8,
   EnemyShip,
+  GameMode,
   GameState,
   PlayerStats,
   Terrain,
@@ -29,6 +32,9 @@ export interface MakeOptions {
   stats?: Partial<PlayerStats>;
   rngState?: number;
   nextExtraLifeAt?: number;
+  mode?: GameMode;
+  abilities?: AbilityId[];
+  flagshipHp?: number;
 }
 
 export function makeState(map: string, opts: MakeOptions = {}): GameState {
@@ -55,9 +61,18 @@ export function makeState(map: string, opts: MakeOptions = {}): GameState {
       } else if (ch === 'P') {
         player = i;
       } else if (ch >= '1' && ch <= '9') {
-        enemies.push({ id: Number(ch), kind: 'pirate', pos: i, facing: 'S' });
+        enemies.push({ id: Number(ch), kind: 'pirate', pos: i, facing: 'S', hp: 1, ai: 'reckless' });
       } else if (ch >= 'F' && ch <= 'H') {
-        enemies.push({ id: 10 + ch.charCodeAt(0) - 70, kind: 'fastPirate', pos: i, facing: 'S' });
+        enemies.push({
+          id: 10 + ch.charCodeAt(0) - 70,
+          kind: 'fastPirate',
+          pos: i,
+          facing: 'S',
+          hp: 1,
+          ai: 'reckless',
+        });
+      } else if (ch === 'B') {
+        enemies.push({ id: 30, kind: 'flagship', pos: i, facing: 'S', hp: opts.flagshipHp ?? 3, ai: 'reckless' });
       } else {
         throw new Error(`未知字符 '${ch}'`);
       }
@@ -76,8 +91,10 @@ export function makeState(map: string, opts: MakeOptions = {}): GameState {
     lives: opts.lives ?? stats.startLives,
     score: opts.score ?? 0,
     level: opts.level ?? 1,
-    nextExtraLifeAt: opts.nextExtraLifeAt ?? stats.extraLifeEvery,
+    nextExtraLifeAt: opts.nextExtraLifeAt ?? (stats.extraLifeEvery > 0 ? stats.extraLifeEvery : Number.MAX_SAFE_INTEGER),
     stats,
+    mode: opts.mode ?? 'levels',
+    abilities: opts.abilities ?? [],
     runSeed: 42,
     rngState: opts.rngState ?? 123456789,
     phase: 'playing',

@@ -5,6 +5,7 @@
 // rngState  = deriveSeed(levelSeed, RUN_SALT) 供对局内随机（传送落点），
 // 与重试次数无关 —— 同种子完全可复现。
 
+import { rollDraft } from './abilities';
 import { chebyshev, dirFromTo, neighbors8 } from './geometry';
 import { createRng, deriveSeed } from './rng';
 import { DEFAULT_STATS } from './types';
@@ -19,6 +20,10 @@ const MAX_FAST = 4;
 const RUN_SALT = 0x9e37;
 
 export function levelConfigFor(level: number): LevelConfig {
+  // cautiousRatio 按原作：L1–5 只有黑船（0%），L6–10 混入 30%，L11+ 混入 60%
+  let cautiousRatio = 0;
+  if (level >= 11) cautiousRatio = 0.6;
+  else if (level >= 6) cautiousRatio = 0.3;
   return {
     width: BOARD_W,
     height: BOARD_H,
@@ -28,9 +33,46 @@ export function levelConfigFor(level: number): LevelConfig {
     vortexes: [level >= 6 ? 1 : 0, 2],
     enemies: Math.min(3 + Math.floor(0.8 * level), MAX_ENEMIES),
     fastEnemies: level < 4 ? 0 : Math.min(1 + Math.floor((level - 4) / 3), MAX_FAST),
+    cautiousRatio,
     minSpawnDist: 4,
     minEnemyGap: 2,
     connectivity: 0.8,
+  };
+}
+
+/** 肉鸽 15 关配置：Boss 关低障碍、漩涡下限恒 1；reefGarden 使礁石两端 +3 */
+export function rogueLevelConfigFor(level: number, reefGarden = false): LevelConfig {
+  // cautiousRatio（原作红船比例）：L6–10 混入 ≈33%，L11–15 混入 ≈60%
+  const cautiousRatio = level >= 11 ? 0.6 : level >= 6 ? 0.33 : 0;
+  const table: Record<number, { enemies: number; fastEnemies: number; flagshipHp?: number; islands: [number, number]; reefs: [number, number] }> = {
+    1: { enemies: 3, fastEnemies: 0, islands: [3, 5], reefs: [2, 4] },
+    2: { enemies: 4, fastEnemies: 0, islands: [3, 5], reefs: [2, 4] },
+    3: { enemies: 4, fastEnemies: 1, islands: [3, 6], reefs: [2, 4] },
+    4: { enemies: 5, fastEnemies: 1, islands: [3, 6], reefs: [2, 4] },
+    5: { enemies: 3, fastEnemies: 0, flagshipHp: 3, islands: [3, 5], reefs: [2, 3] },
+    6: { enemies: 6, fastEnemies: 1, islands: [3, 6], reefs: [2, 4] },
+    7: { enemies: 6, fastEnemies: 2, islands: [3, 6], reefs: [2, 4] },
+    8: { enemies: 7, fastEnemies: 2, islands: [4, 6], reefs: [2, 4] },
+    9: { enemies: 8, fastEnemies: 2, islands: [4, 6], reefs: [2, 4] },
+    10: { enemies: 4, fastEnemies: 1, flagshipHp: 4, islands: [3, 5], reefs: [2, 3] },
+    11: { enemies: 8, fastEnemies: 3, islands: [4, 7], reefs: [3, 5] },
+    12: { enemies: 9, fastEnemies: 3, islands: [4, 7], reefs: [3, 5] },
+    13: { enemies: 10, fastEnemies: 3, islands: [4, 7], reefs: [3, 5] },
+    14: { enemies: 11, fastEnemies: 4, islands: [4, 7], reefs: [3, 5] },
+    15: { enemies: 5, fastEnemies: 2, flagshipHp: 5, islands: [3, 5], reefs: [2, 3] },
+  };
+  const row = table[Math.min(Math.max(level, 1), 15)]!;
+  const reefs: [number, number] = reefGarden ? [row.reefs[0] + 3, row.reefs[1] + 3] : row.reefs;
+  return {
+    width: BOARD_W,
+    height: BOARD_H,
+    vortexes: [1, 2],
+    minSpawnDist: 4,
+    minEnemyGap: 2,
+    connectivity: 0.8,
+    cautiousRatio,
+    ...row,
+    reefs,
   };
 }
 
@@ -119,14 +161,24 @@ export function generateBoard(config: LevelConfig, levelSeed: number): BoardPart
     }
     if (positions.length < config.enemies) continue;
 
-    // 快速海盗分配到随机位置；facing 朝玩家（纯装饰）
-    const fastSet = new Set(rng.shuffle([...positions]).slice(0, config.fastEnemies));
-    const enemies: EnemyShip[] = positions.map((pos, i) => ({
-      id: i + 1,
-      kind: fastSet.has(pos) ? 'fastPirate' : 'pirate',
-      pos,
-      facing: dirFromTo(pos, playerPos, w),
-    }));
+    // 快速海盗分配到随机位置；Boss 关第 1 艘固定为旗舰（id=1）
+    const flagshipPos = config.flagshipHp !== undefined ? positions[0] : undefined;
+    const fastPool = config.flagshipHp !== undefined ? positions.slice(1) : [...positions];
+    const fastSet = new Set(rng.shuffle(fastPool).slice(0, config.fastEnemies));
+    const enemies: EnemyShip[] = positions.map((pos, i) => {
+      const isFlagship = flagshipPos === pos;
+      const kind = isFlagship ? 'flagship' : fastSet.has(pos) ? 'fastPirate' : 'pirate';
+      // AI 赋值：旗舰恒 reckless（靠旗舰子阶段驱动），cautious 只给非旗舰
+      const ai = !isFlagship && rng.next() < config.cautiousRatio ? 'cautious' as const : 'reckless' as const;
+      return {
+        id: i + 1,
+        kind,
+        pos,
+        facing: dirFromTo(pos, playerPos, w),
+        hp: isFlagship ? config.flagshipHp! : 1,
+        ai,
+      };
+    });
     return { terrain, playerPos, enemies };
   }
 
@@ -152,14 +204,22 @@ function fallbackBoard(config: LevelConfig): BoardParts {
   const enemies: EnemyShip[] = [];
   for (let i = 0; i < n; i++) {
     const pos = eligible[Math.floor(i * stride)]!;
-    enemies.push({ id: i + 1, kind: 'pirate', pos, facing: dirFromTo(pos, playerPos, w) });
+    const isFlagship = config.flagshipHp !== undefined && i === 0;
+    enemies.push({
+      id: i + 1,
+      kind: isFlagship ? 'flagship' : 'pirate',
+      pos,
+      facing: dirFromTo(pos, playerPos, w),
+      hp: isFlagship ? config.flagshipHp! : 1,
+      ai: 'reckless' as const,
+    });
   }
   return { terrain, playerPos, enemies };
 }
 
 // ===== 对局构造 =====
 
-/** 开新对局（第 1 关） */
+/** 开新对局（第 1 关，关卡制） */
 export function newRun(runSeed: number, stats: PlayerStats = DEFAULT_STATS): GameState {
   const config = levelConfigFor(1);
   const levelSeed = deriveSeed(runSeed, 1);
@@ -174,7 +234,9 @@ export function newRun(runSeed: number, stats: PlayerStats = DEFAULT_STATS): Gam
     score: 0,
     level: 1,
     nextExtraLifeAt: stats.extraLifeEvery,
-    stats,
+    stats: { ...stats }, // 克隆：防调用方（或默认值）被引用共享后误改
+    mode: 'levels',
+    abilities: [],
     runSeed,
     rngState: deriveSeed(levelSeed, RUN_SALT),
     phase: 'playing',
@@ -182,9 +244,35 @@ export function newRun(runSeed: number, stats: PlayerStats = DEFAULT_STATS): Gam
   };
 }
 
-/** 进入指定关卡：继承命/分/门槛，重摆棋盘（同 (runSeed, level) 同布局） */
+/** 开新肉鸽 run（15 关，禁用奖命，船体上限 5） */
+export function newRogueRun(runSeed: number): GameState {
+  const stats: PlayerStats = { cannonRange: 3, startLives: 3, extraLifeEvery: 0, maxLives: 5 };
+  const config = rogueLevelConfigFor(1);
+  const levelSeed = deriveSeed(runSeed, 1);
+  const board = generateBoard(config, levelSeed);
+  return {
+    width: config.width,
+    height: config.height,
+    terrain: board.terrain,
+    player: { pos: board.playerPos, facing: 'N' },
+    enemies: board.enemies,
+    lives: stats.startLives,
+    score: 0,
+    level: 1,
+    nextExtraLifeAt: Number.MAX_SAFE_INTEGER,
+    stats,
+    mode: 'rogue',
+    abilities: [],
+    runSeed,
+    rngState: deriveSeed(levelSeed, RUN_SALT),
+    phase: 'playing',
+    turn: 0,
+  };
+}
+
+/** 进入指定关卡：继承命/分/门槛/能力，按 mode 分派生成配置 */
 export function startLevel(prev: GameState, level: number): GameState {
-  const config = levelConfigFor(level);
+  const config = prev.mode === 'rogue' ? rogueLevelConfigFor(level, prev.abilities.includes('reefGarden')) : levelConfigFor(level);
   const levelSeed = deriveSeed(prev.runSeed, level);
   const board = generateBoard(config, levelSeed);
   return {
@@ -197,10 +285,14 @@ export function startLevel(prev: GameState, level: number): GameState {
     score: prev.score,
     level,
     nextExtraLifeAt: prev.nextExtraLifeAt,
-    stats: prev.stats,
+    stats: { ...prev.stats },
+    mode: prev.mode,
+    abilities: [...prev.abilities],
     runSeed: prev.runSeed,
     rngState: deriveSeed(levelSeed, RUN_SALT),
     phase: 'playing',
     turn: 0,
   };
 }
+
+export { rollDraft };

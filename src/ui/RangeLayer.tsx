@@ -9,9 +9,9 @@ interface Props {
   width: number;
   /** 玩家格（当前射线起点） */
   origin: number;
-  currentRays: [RayResult, RayResult] | null;
+  currentRays: RayResult[] | null;
   /** 悬停格移动后的预览射线及其起点 */
-  previewRays: [RayResult, RayResult] | null;
+  previewRays: RayResult[] | null;
   previewOrigin: number | null;
   moveTargets: number[];
   busy: boolean;
@@ -63,7 +63,8 @@ function Lane({
     <>
       {ray.cells.map((cell, k) => {
         const isLast = k === ray.cells.length - 1;
-        if (isLast && ray.hitShipId !== undefined) {
+        // 命中格（pierce 下可有多个）：锁定框
+        if (ray.hitCells.includes(cell)) {
           return (
             <div
               key={cell}

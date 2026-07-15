@@ -3,7 +3,10 @@ import {
   floodFillPassable,
   generateBoard,
   levelConfigFor,
+  newRogueRun,
   newRun,
+  rogueLevelConfigFor,
+  rollDraft,
   startLevel,
 } from '../src/engine/generator';
 import { chebyshev, neighbors8 } from '../src/engine/geometry';
@@ -13,7 +16,7 @@ import { makeState } from './helpers';
 /** 断言一个 GameState 满足全部公平性约束 */
 function assertConstraints(state: GameState) {
   const { width: w, height: h, terrain, player, enemies, level } = state;
-  const config = levelConfigFor(level);
+  const config = state.mode === 'rogue' ? rogueLevelConfigFor(level, state.abilities.includes('reefGarden')) : levelConfigFor(level);
 
   // 尺寸与地形合法
   expect(terrain).toHaveLength(w * h);
@@ -39,6 +42,7 @@ function assertConstraints(state: GameState) {
     expect(terrain[e.pos]).toBe('water');
     expect(region.has(e.pos)).toBe(true);
     expect(chebyshev(e.pos, player.pos, w)).toBeGreaterThanOrEqual(config.minSpawnDist);
+    expect(e.hp).toBe(e.kind === 'flagship' ? config.flagshipHp : 1);
   }
   for (let i = 0; i < enemies.length; i++) {
     for (let j = i + 1; j < enemies.length; j++) {
@@ -188,5 +192,68 @@ describe('floodFillPassable', () => {
     expect(floodFillPassable(s.terrain, -0, 5, 1).size).toBe(5);
     const islands = makeState(`#P`);
     expect(floodFillPassable(islands.terrain, 0, 2, 1).size).toBe(0);
+  });
+});
+
+describe('肉鸽关卡配置与生成', () => {
+  it('newRogueRun 初始化肉鸽状态：mode/船体/禁用奖命/漩涡下限', () => {
+    const s = newRogueRun(123);
+    expect(s.mode).toBe('rogue');
+    expect(s.lives).toBe(3);
+    expect(s.stats).toMatchObject({ cannonRange: 3, startLives: 3, extraLifeEvery: 0, maxLives: 5 });
+    expect(s.nextExtraLifeAt).toBe(Number.MAX_SAFE_INTEGER);
+    expect(s.abilities).toEqual([]);
+    expect(s.terrain.some((t) => t === 'vortex')).toBe(true);
+  });
+
+  it('rogueLevelConfigFor 数值表关键点：Boss 关旗舰 hp，reefGarden 礁石 +3', () => {
+    expect(rogueLevelConfigFor(1)).toMatchObject({ enemies: 3, fastEnemies: 0, vortexes: [1, 2] });
+    expect(rogueLevelConfigFor(5)).toMatchObject({ enemies: 3, fastEnemies: 0, flagshipHp: 3, reefs: [2, 3] });
+    expect(rogueLevelConfigFor(10)).toMatchObject({ enemies: 4, fastEnemies: 1, flagshipHp: 4 });
+    expect(rogueLevelConfigFor(15)).toMatchObject({ enemies: 5, fastEnemies: 2, flagshipHp: 5 });
+    expect(rogueLevelConfigFor(11, true).reefs).toEqual([6, 8]);
+  });
+
+  it('Boss 关生成：id=1 为旗舰，hp 正确且不计入快速海盗', () => {
+    for (const [level, hp] of [[5, 3], [10, 4], [15, 5]] as const) {
+      const s = startLevel(newRogueRun(9001), level);
+      const flag = s.enemies.find((e) => e.kind === 'flagship')!;
+      expect(flag.id).toBe(1);
+      expect(flag.hp).toBe(hp);
+      expect(s.enemies.filter((e) => e.kind === 'fastPirate')).toHaveLength(rogueLevelConfigFor(level).fastEnemies);
+    }
+  });
+
+  it('startLevel 按 mode 分派：关卡制 L6 可无漩涡以下限规则，肉鸽 L6 必有漩涡且继承能力', () => {
+    const levels = startLevel(newRun(42), 5);
+    expect(levels.mode).toBe('levels');
+    expect(levels.abilities).toEqual([]);
+
+    const rogueBase = { ...newRogueRun(42), abilities: ['reefGarden' as const], lives: 2, score: 777 };
+    const rogue = startLevel(rogueBase, 6);
+    expect(rogue.mode).toBe('rogue');
+    expect(rogue.abilities).toEqual(['reefGarden']);
+    expect(rogue.lives).toBe(2);
+    expect(rogue.score).toBe(777);
+    expect(rogue.terrain.some((t) => t === 'vortex')).toBe(true);
+  });
+
+  it('肉鸽 500 组生成压测（1..15，含 Boss 关）满足约束', () => {
+    for (let i = 0; i < 500; i++) {
+      const seed = i * 3571 + 91;
+      const level = (i % 15) + 1;
+      const state = startLevel(newRogueRun(seed), level);
+      assertConstraints(state);
+      if ([5, 10, 15].includes(level)) {
+        expect(state.enemies.some((e) => e.kind === 'flagship')).toBe(true);
+      }
+    }
+  });
+
+  it('rollDraft 从 generator re-export 且同种子复现', () => {
+    const s = { ...newRogueRun(2026), level: 4 };
+    expect(rollDraft(s)).toEqual(rollDraft(s));
+    expect(rollDraft(s).length).toBeGreaterThan(0);
+    expect(rollDraft(s).length).toBeLessThanOrEqual(3);
   });
 });

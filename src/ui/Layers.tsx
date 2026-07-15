@@ -62,6 +62,7 @@ const FX_BASE_DUR: Record<Effect['kind'], number> = {
   thud: 460,
   splash: 500,
   scorePop: 750,
+  flash: 280,
 };
 
 /** 各特效的子结构：核心/冲击环/烟尘等独立动画 */
@@ -106,6 +107,8 @@ function EffectBody({ kind, text }: { kind: Effect['kind']; text?: string }) {
       );
     case 'scorePop':
       return <>{text}</>;
+    case 'flash':
+      return <span className="fx-flash" />;
   }
 }
 

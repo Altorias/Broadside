@@ -1,8 +1,9 @@
 // ===== ai.ts 单测：贪心逼近的确定性与收敛性 =====
-import { enemyIntent } from '../src/engine/ai';
+import { cautiousIntent, enemyIntent, intentFor } from '../src/engine/ai';
 import { chebyshev, idx } from '../src/engine/geometry';
 
 const w = 12;
+const h = 9;
 
 describe('enemyIntent', () => {
   it('双轴偏差：对角逼近', () => {
@@ -50,5 +51,52 @@ describe('enemyIntent', () => {
         if (++guard > 20) throw new Error('AI 不收敛');
       }
     }
+  });
+});
+
+import { cautiousIntent, intentFor } from "../src/engine/ai";
+describe("cautiousIntent 红船绕障", () => {
+  it("绕开正前方障碍，选正交分量", () => {
+    const ship = { id: 1, kind: "pirate" as const, pos: idx(2, 1, w), facing: "S" as const, hp: 1, ai: "cautious" as const };
+    const terrain = new Array(w * h).fill("water");
+    terrain[idx(3, 1, w)] = "island"; // 正南被岛挡
+    const result = cautiousIntent(ship, idx(5, 3, w), terrain, w, h);
+    expect(result).not.toBe(idx(3, 1, w)); // 不硬闯岛
+  });
+
+  it("全包围时退化到贪心硬闯", () => {
+    const ship = { id: 1, kind: "pirate" as const, pos: idx(4, 1, w), facing: "S" as const, hp: 1, ai: "cautious" as const };
+    const terrain = new Array(w * h).fill("water");
+    for (const n of [idx(3,0,w), idx(3,1,w), idx(3,2,w), idx(4,0,w),
+                    idx(4,2,w), idx(5,0,w), idx(5,1,w), idx(5,2,w)]) {
+      terrain[n] = "island";
+    }
+    const result = cautiousIntent(ship, idx(7, 3, w), terrain, w, h);
+    expect(result).toBe(idx(5, 2, w)); // 硬闯
+  });
+
+  it("绕开漩涡和残骸", () => {
+    const ship = { id: 1, kind: "fastPirate" as const, pos: idx(3, 3, w), facing: "S" as const, hp: 1, ai: "cautious" as const };
+    const terrain = new Array(w * h).fill("water");
+    terrain[idx(4, 3, w)] = "vortex";
+    terrain[idx(4, 4, w)] = "wreck";
+    const result = cautiousIntent(ship, idx(8, 3, w), terrain, w, h);
+    expect(result).not.toBe(idx(4, 3, w));
+    expect(result).not.toBe(idx(4, 4, w));
+  });
+});
+
+describe("intentFor 分发", () => {
+  it("reckless 走贪心，cautious 走绕障", () => {
+    // 船在 (2,1)，玩家在 (4,1) 正南 → primary = (3,1)
+    const ship = { id: 1, kind: "pirate" as const, pos: idx(2, 1, w), facing: "S" as const, hp: 1 };
+    const reckless = { ...ship, ai: "reckless" as const } as const;
+    const cautious = { ...ship, ai: "cautious" as const } as const;
+    const terrain = new Array(w * h).fill("water");
+    terrain[idx(3, 1, w)] = "island"; // 正南被挡
+    const r = intentFor(reckless, idx(4, 1, w), terrain, w, h);
+    const c = intentFor(cautious, idx(4, 1, w), terrain, w, h);
+    expect(r).toBe(idx(3, 1, w)); // reckless 直撞岛
+    expect(c).not.toBe(idx(3, 1, w)); // cautious 绕开
   });
 });

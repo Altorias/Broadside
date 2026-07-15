@@ -252,9 +252,54 @@ body {
   gap: 2px;
 }
 
+.flagship-hp { color: var(--error); letter-spacing: 2px; }
+
 .life-icon {
   width: 16px;
   height: 16px;
+}
+
+/* ── 抽卡面板 ─────────────────────────── */
+
+.draft-card {
+  min-width: 380px;
+  max-width: 520px;
+}
+
+.draft-grid {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.draft-card-btn {
+  flex: 1;
+  appearance: none;
+  border: 2px solid var(--accent);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 14px 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  --accent: var(--accent);
+}
+
+.draft-card-btn:hover { background: var(--surface-2); border-color: var(--accent); transform: scale(1.04); }
+.draft-card-btn:active { transform: scale(0.98); }
+
+.draft-badge { font-size: 20px; opacity: 0.7; }
+.draft-name { font-size: 15px; }
+.draft-desc { font-size: 11.5px; color: var(--text-soft); line-height: 1.45; text-align: center; }
+.draft-branch {
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
 }
 
 .controls-hint {

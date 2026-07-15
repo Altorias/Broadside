@@ -4,10 +4,12 @@
 // 敌船采用微步制：step1 全体同时动一步并结算冲突，step2 仅存活的快速海盗
 // 重新瞄准再动一步——每格进入都接受完整结算，无"跳格"特判。
 
-import { enemyIntent } from './ai';
+import { enemyIntent, intentFor } from './ai';
+import { hasAbility } from './abilities';
 import { DIRS, chebyshev, dirFromTo, portOf, starboardOf, step } from './geometry';
 import { createRng, type Rng } from './rng';
 import { levelClearBonus, sinkPoints } from './score';
+import { ROGUE_FINAL_LEVEL } from './types';
 import type {
   Action,
   Dir8,
@@ -19,56 +21,91 @@ import type {
   Terrain,
   TurnResult,
 } from './types';
-
-/** 炮弹会被挡下的地形 */
-const BLOCKS_SHOT: readonly Terrain[] = ['island', 'reef', 'wreck'];
+/** 炮弹被地形挡下判定（reefGarden 强化豁免礁石） */
+function blocksShot(state: GameState, t: Terrain): boolean {
+  if (t === 'reef' && hasAbility(state, 'reefGarden')) return false;
+  return t === 'island' || t === 'reef' || t === 'wreck';
+}
 
 // ===== 查询函数（UI 预览与结算共用同一实现）=====
 
-/** 玩家当前的合法移动方向（目标为水/漩涡且无敌船占据） */
+/** 玩家当前的合法移动方向（目标为水/漩涡且无敌船占据；ram 则可撞非旗舰） */
 export function legalMoves(state: GameState): Dir8[] {
-  const occupied = new Set(state.enemies.map((e) => e.pos));
+  const ram = hasAbility(state, 'ram');
   const out: Dir8[] = [];
   for (const d of DIRS) {
     const to = step(state.player.pos, d, state.width, state.height);
     if (to === -1) continue;
     const t = state.terrain[to]!;
-    if ((t === 'water' || t === 'vortex') && !occupied.has(to)) out.push(d);
+    const enemy = state.enemies.find((e) => e.pos === to);
+    if (enemy) {
+      if (ram && enemy.kind !== 'flagship' && t !== 'vortex') out.push(d);
+    } else if (t === 'water' || t === 'vortex') {
+      out.push(d);
+    }
   }
   return out;
+}
+
+/** 玩家当前的合法转向方向（需 helm；不含当前朝向） */
+export function legalTurns(state: GameState): Dir8[] {
+  if (!hasAbility(state, 'helm')) return [];
+  return DIRS.filter((d) => d !== state.player.facing);
 }
 
 export interface RayResult {
   side: Side;
   /** 炮弹依次飞过的格（含命中/受挡格），动画路径 */
   cells: number[];
+  /** 第一个被命中的船（UI 锁定框兼容字段 = hits[0]） */
   hitShipId?: number;
   blockedBy?: Terrain;
+  /** 全部被命中的船 id（pierce 强化可多个），与 hitCells 一一对应 */
+  hits: number[];
+  hitCells: number[];
 }
 
-/** 单舷射线：逐格扫描，命中第一个实体即停；水/漩涡飞越 */
+/** 单舷射线：逐格扫描，命中第一个实体即停；水/漩涡飞越。
+ *  pierce 强化：命中"本发会击沉"（射前 hp=1）的船后继续飞行 */
 function scanRay(state: GameState, origin: number, dir: Dir8, side: Side): RayResult {
-  const occupied = new Map(state.enemies.map((e) => [e.pos, e.id]));
+  const pierce = hasAbility(state, 'pierce');
+  const occupied = new Map(state.enemies.map((e) => [e.pos, e]));
   const cells: number[] = [];
+  const hits: number[] = [];
+  const hitCells: number[] = [];
+  let blockedBy: Terrain | undefined;
   let cur = origin;
   for (let k = 0; k < state.stats.cannonRange; k++) {
     cur = step(cur, dir, state.width, state.height);
     if (cur === -1) break;
     cells.push(cur);
-    const hit = occupied.get(cur);
-    if (hit !== undefined) return { side, cells, hitShipId: hit };
+    const ship = occupied.get(cur);
+    if (ship) {
+      hits.push(ship.id);
+      hitCells.push(cur);
+      if (pierce && ship.hp === 1) continue; // 将沉：贯穿续飞
+      break; // 未沉（血厚）或无贯穿：停在这艘船
+    }
     const t = state.terrain[cur]!;
-    if (BLOCKS_SHOT.includes(t)) return { side, cells, blockedBy: t };
+    if (blocksShot(state, t)) {
+      blockedBy = t;
+      break;
+    }
   }
-  return { side, cells };
+  return { side, cells, hitShipId: hits[0], blockedBy, hits, hitCells };
 }
 
-/** 以 (pos, facing) 齐射的左右舷两条射线。悬停预览与真开炮共用 */
-export function fireRays(state: GameState, pos: number, facing: Dir8): [RayResult, RayResult] {
-  return [
+/** 齐射射线组：恒有左右舷两条；bowChaser 强化追加舰艏第三条 */
+export type VolleyRays = [RayResult, RayResult, ...RayResult[]];
+
+/** 以 (pos, facing) 齐射的射线组。悬停预览与真开炮共用 */
+export function fireRays(state: GameState, pos: number, facing: Dir8): VolleyRays {
+  const rays: VolleyRays = [
     scanRay(state, pos, portOf(facing), 'port'),
     scanRay(state, pos, starboardOf(facing), 'starboard'),
   ];
+  if (hasAbility(state, 'bowChaser')) rays.push(scanRay(state, pos, facing, 'bow'));
+  return rays;
 }
 
 /**
@@ -102,13 +139,28 @@ interface TurnCtx {
 export function resolveTurn(state: GameState, action: Action): TurnResult {
   if (state.phase !== 'playing') return { state, events: [] };
 
+  // 转向（helm 强化）：无 helm 或转同向 → 非法
+  if (action.type === 'turn') {
+    if (!hasAbility(state, 'helm') || action.dir === state.player.facing) {
+      return { state, events: [] };
+    }
+  }
+
   // 移动合法性预检：非法动作返回原 state + 空事件（防御式忽略）
   if (action.type === 'move') {
     const to = step(state.player.pos, action.dir, state.width, state.height);
     if (to === -1) return { state, events: [] };
     const t = state.terrain[to]!;
-    if (t !== 'water' && t !== 'vortex') return { state, events: [] };
-    if (state.enemies.some((e) => e.pos === to)) return { state, events: [] };
+    const blocked = t !== 'water' && t !== 'vortex';
+    const enemy = state.enemies.find((e) => e.pos === to);
+    if (enemy) {
+      // ram 可撞普通敌船（非旗舰）；漩涡格上的敌不可撞（推挤落点语义复杂，从简）
+      if (!hasAbility(state, 'ram') || enemy.kind === 'flagship' || t === 'vortex') {
+        return { state, events: [] };
+      }
+    } else if (blocked) {
+      return { state, events: [] };
+    }
   }
 
   // 克隆（108 格规模，整体浅拷贝 + 可变部分逐层复制即可）
@@ -124,56 +176,32 @@ export function resolveTurn(state: GameState, action: Action): TurnResult {
   s.turn++;
 
   // ── 阶段 1：玩家行动 ──────────────────────────────
-  if (action.type === 'move') {
+  if (action.type === 'turn') {
+    s.player = { ...s.player, facing: action.dir };
+    events.push({ type: 'playerTurned', facing: action.dir });
+  } else if (action.type === 'move') {
     const from = s.player.pos;
     const to = step(from, action.dir, s.width, s.height); // 预检已保证合法
+    const rammed = s.enemies.find((e) => e.pos === to);
     s.player = { pos: to, facing: action.dir };
     events.push({ type: 'playerMoved', from, to, facing: action.dir });
+    if (rammed) resolveRam(s, rammed, action.dir, ctx, events);
     if (s.terrain[to] === 'vortex') {
       const dest = findSafeCell(s, rng);
       events.push({ type: 'playerTeleported', from: to, to: dest });
       s.player.pos = dest;
     }
+    // tailwind：移动结算后从新位置新朝向自动齐射一轮
+    if (hasAbility(s, 'tailwind')) fireVolley(s, ctx, events);
   } else {
     // 开炮恒合法（放空炮 = 战术等待）
-    const rays = fireRays(s, s.player.pos, s.player.facing);
-    for (const r of rays) {
-      events.push({
-        type: 'cannonFired',
-        side: r.side,
-        cells: r.cells,
-        hitShipId: r.hitShipId,
-        blockedBy: r.blockedBy,
-      });
-    }
-    for (const r of rays) {
-      if (r.hitShipId === undefined) continue;
-      const ship = s.enemies.find((e) => e.id === r.hitShipId)!;
-      s.enemies = s.enemies.filter((e) => e.id !== r.hitShipId);
-      const points = sinkPoints('cannon');
-      ctx.scoreGain += points;
-      events.push({
-        type: 'shipSunk',
-        shipId: ship.id,
-        kind: ship.kind,
-        from: ship.pos,
-        to: ship.pos,
-        cause: 'cannon',
-        points,
-      });
-    }
+    fireVolley(s, ctx, events);
   }
 
-  // ── 阶段 2：敌船微步 ──────────────────────────────
-  resolveEnemyStep(s, s.enemies.map((e) => e.id), 1, events, rng, ctx);
-  resolveEnemyStep(
-    s,
-    s.enemies.filter((e) => e.kind === 'fastPirate').map((e) => e.id),
-    2,
-    events,
-    rng,
-    ctx,
-  );
+  // ── 阶段 2：敌船微步（旗舰子阶段先决）────────────
+  enemyPhase(s, 1, events, rng, ctx);
+  enemyPhase(s, 2, events, rng, ctx);
+  resolveVortexPull(s, events, ctx);
 
   // ── 阶段 3：计分 / 奖命 / 胜负 ────────────────────
   s.score += ctx.scoreGain;
@@ -186,14 +214,20 @@ export function resolveTurn(state: GameState, action: Action): TurnResult {
     const bonus = levelClearBonus(s.level);
     s.score += bonus;
     checkExtraLife(s, events);
-    s.phase = 'levelCleared';
-    events.push({ type: 'levelCleared', level: s.level, bonus });
+    if (s.mode === 'rogue' && s.level >= ROGUE_FINAL_LEVEL) {
+      s.phase = 'victory';
+      events.push({ type: 'victory', score: s.score });
+    } else {
+      s.phase = 'levelCleared';
+      events.push({ type: 'levelCleared', level: s.level, bonus });
+    }
   }
   s.rngState = rng.state();
   return { state: s, events };
 }
 
 function checkExtraLife(s: GameState, events: GameEvent[]): void {
+  if (s.stats.extraLifeEvery <= 0) return; // 肉鸽禁用奖命（防 while 死循环）
   while (s.score >= s.nextExtraLifeAt) {
     s.lives++;
     s.nextExtraLifeAt += s.stats.extraLifeEvery;
@@ -202,25 +236,275 @@ function checkExtraLife(s: GameState, events: GameEvent[]): void {
 }
 
 /**
- * 单个微步的敌船同时移动 + 冲突结算。
+ * 齐射单一出口：cannon 系事件（cannonFired / shipDamaged / shipSunk(cannon) /
+ * wreckCreated('volley')）必须连续成块——groupBeats 依赖此归拍。
+ * 结算顺序确定性：射线序（port→starboard→bow）→ 射线内受害者序 →
+ * blast 溅射按 N/E/S/W 序；每次伤害前检查船仍存活。
+ */
+function fireVolley(s: GameState, ctx: TurnCtx, events: GameEvent[]): void {
+  const rays = fireRays(s, s.player.pos, s.player.facing);
+  for (const r of rays) {
+    events.push({
+      type: 'cannonFired',
+      side: r.side,
+      cells: r.cells,
+      hitShipId: r.hitShipId,
+      blockedBy: r.blockedBy,
+    });
+  }
+  const blast = hasAbility(s, 'blast');
+  for (const r of rays) {
+    for (let i = 0; i < r.hits.length; i++) {
+      const pos = r.hitCells[i]!;
+      applyCannonDamage(s, r.hits[i]!, ctx, events);
+      if (!blast) continue;
+      // 爆裂弹：命中格 4 正邻格溅射（仅主命中触发，无链式）
+      for (const d of ['N', 'E', 'S', 'W'] as const) {
+        const n = step(pos, d, s.width, s.height);
+        if (n === -1) continue;
+        const neighbor = s.enemies.find((e) => e.pos === n);
+        if (neighbor) applyCannonDamage(s, neighbor.id, ctx, events);
+      }
+    }
+  }
+}
+
+/** 单发炮击伤害管线：hp-1 → 未沉发 shipDamaged；归零发 shipSunk 并移除 */
+function applyCannonDamage(
+  s: GameState,
+  shipId: number,
+  ctx: TurnCtx,
+  events: GameEvent[],
+): void {
+  const ship = s.enemies.find((e) => e.id === shipId);
+  if (!ship) return; // 已在本轮先前伤害中沉没（pierce/blast 多点伤害时可达）
+  ship.hp--;
+  if (ship.hp > 0) {
+    events.push({ type: 'shipDamaged', shipId: ship.id, at: ship.pos, hpLeft: ship.hp });
+    return;
+  }
+  const points = sinkPoints('cannon', ship.kind);
+  ctx.scoreGain += points;
+  events.push({
+    type: 'shipSunk',
+    shipId: ship.id,
+    kind: ship.kind,
+    from: ship.pos,
+    to: ship.pos,
+    cause: 'cannon',
+    points,
+  });
+  const wreckAt = ship.pos;
+  s.enemies = s.enemies.filter((e) => e.id !== ship.id);
+  if (hasAbility(s, 'wreckShot') && s.terrain[wreckAt] === 'water') {
+    s.terrain[wreckAt] = 'wreck';
+    events.push({ type: 'wreckCreated', at: wreckAt, step: 'volley' });
+  }
+}
+
+/** vortexPull：敌方微步后把最近的非旗舰敌向最近漩涡吸 1 格（确定性 tie-break） */
+function resolveVortexPull(s: GameState, events: GameEvent[], ctx: TurnCtx): void {
+  if (!hasAbility(s, 'vortexPull')) return;
+  const vortexes = s.terrain
+    .map((t, i) => (t === 'vortex' ? i : -1))
+    .filter((i) => i !== -1);
+  const candidates = s.enemies.filter((e) => e.kind !== 'flagship');
+  if (vortexes.length === 0 || candidates.length === 0) return;
+
+  let best: { ship: EnemyShip; vortex: number; dist: number } | null = null;
+  for (const ship of candidates) {
+    for (const vortex of vortexes) {
+      const dist = chebyshev(ship.pos, vortex, s.width);
+      if (
+        best === null ||
+        dist < best.dist ||
+        (dist === best.dist && (ship.id < best.ship.id || (ship.id === best.ship.id && vortex < best.vortex)))
+      ) {
+        best = { ship, vortex, dist };
+      }
+    }
+  }
+  if (!best || best.dist === 0) return;
+  const to = enemyIntent(best.ship.pos, best.vortex, s.width);
+  if (to === s.player.pos || s.enemies.some((e) => e.id !== best!.ship.id && e.pos === to)) return;
+
+  const from = best.ship.pos;
+  const terrain = s.terrain[to]!;
+  const sink = (cause: SinkCause) => {
+    const points = sinkPoints(cause, best!.ship.kind);
+    ctx.scoreGain += points;
+    events.push({
+      type: 'shipSunk',
+      shipId: best!.ship.id,
+      kind: best!.ship.kind,
+      from,
+      to,
+      cause,
+      points,
+      step: 'pull',
+    });
+    s.enemies = s.enemies.filter((e) => e.id !== best!.ship.id);
+  };
+  if (terrain === 'vortex') sink('vortex');
+  else if (terrain === 'island' || terrain === 'reef' || terrain === 'wreck') sink('obstacle');
+  else {
+    best.ship.pos = to;
+    events.push({ type: 'enemyPulled', shipId: best.ship.id, from, to, vortexAt: best.vortex });
+  }
+}
+
+/**
+ * 冲角推挤：玩家移入 rammed 所在格，将其沿玩家航向推 1 格。
+ * 落点 C = step(被撞船原位, dir)：出界=搁浅沉/障碍=撞沉/漩涡=吞噬/
+ * 另一敌=双沉留残骸/空水=换位存活。玩家最终占据被撞船原位（调用方赋值）。
+ */
+function resolveRam(
+  s: GameState,
+  rammed: EnemyShip,
+  dir: Dir8,
+  ctx: TurnCtx,
+  events: GameEvent[],
+): void {
+  const from = rammed.pos;
+  const c = step(from, dir, s.width, s.height);
+
+  const sink = (cause: SinkCause, to: number, wreckAt?: number) => {
+    const points = sinkPoints(cause, rammed.kind);
+    ctx.scoreGain += points;
+    s.enemies = s.enemies.filter((e) => e.id !== rammed.id);
+    events.push({
+      type: 'shipSunk',
+      shipId: rammed.id,
+      kind: rammed.kind,
+      from,
+      to,
+      cause,
+      points,
+      step: 'ram',
+    });
+    if (wreckAt !== undefined) {
+      s.terrain[wreckAt] = 'wreck';
+      events.push({ type: 'wreckCreated', at: wreckAt, step: 'ram' });
+    }
+  };
+
+  if (c === -1) {
+    sink('grounded', from); // 推出边界搁浅（to 保持 from，防 -1 渲染）
+    return;
+  }
+  const t = s.terrain[c]!;
+  const other = s.enemies.find((e) => e.pos === c && e.id !== rammed.id);
+  if (other) {
+    // 推入另一艘船：双沉，残骸留 C
+    const op = sinkPoints('collision', other.kind);
+    ctx.scoreGain += op;
+    events.push({
+      type: 'shipSunk',
+      shipId: other.id,
+      kind: other.kind,
+      from: c,
+      to: c,
+      cause: 'collision',
+      points: op,
+      step: 'ram',
+    });
+    s.enemies = s.enemies.filter((e) => e.id !== other.id);
+    sink('collision', c, c);
+  } else if (t === 'island' || t === 'reef' || t === 'wreck') {
+    sink('obstacle', c);
+  } else if (t === 'vortex') {
+    sink('vortex', c);
+  } else {
+    // 空水：被推船存活换位
+    rammed.pos = c;
+    events.push({ type: 'enemyPushed', shipId: rammed.id, from, to: c });
+  }
+}
+
+/**
+ * 单个敌方微步：旗舰子阶段先决 → 小船同时移动结算 → 统一处理撞击玩家。
+ * step1 全体小船 + 旗舰各动一步；step2 仅存活快速海盗（旗舰不动，是"静止巨物"）。
+ */
+function enemyPhase(
+  s: GameState,
+  stepNo: 1 | 2,
+  events: GameEvent[],
+  rng: Rng,
+  ctx: TurnCtx,
+): void {
+  const flag = resolveFlagship(s, stepNo, events);
+  const moverIds = s.enemies
+    .filter((e) => e.kind !== 'flagship' && (stepNo === 1 || e.kind === 'fastPirate'))
+    .map((e) => e.id);
+  const shipsRammed = resolveEnemyStep(s, moverIds, stepNo, events, ctx, flag.pos);
+
+  // 撞击玩家统一结算：每回合封顶扣 1 命；lives 归零则原地留着播死亡动画
+  if ((flag.rammed || shipsRammed) && !ctx.lifeLost) {
+    ctx.lifeLost = true;
+    s.lives--;
+    events.push({ type: 'playerHit', at: s.player.pos, livesLeft: s.lives });
+    if (s.lives > 0) {
+      const from = s.player.pos;
+      const dest = findSafeCell(s, rng);
+      events.push({ type: 'playerTeleported', from, to: dest });
+      s.player.pos = dest;
+    }
+  }
+}
+
+/**
+ * 旗舰子阶段：每回合只在 step1 动一步。碾碎礁石/残骸（terrain→water）；
+ * 被岛屿挡住则站立；漩涡视作水面；撞玩家 = 原地冲撞且自身不沉。
+ * 返回旗舰最终格（供小船结算判"撞旗舰"）与是否冲撞玩家。
+ * 注：旗舰目标格若有小船，纯贪心下该小船同微步必腾空/沉没（与"对穿不可能"
+ * 同款推理），瞬时重叠在微步内自行消解，不实现碾压分支。
+ */
+function resolveFlagship(
+  s: GameState,
+  stepNo: 1 | 2,
+  events: GameEvent[],
+): { pos: number | null; rammed: boolean } {
+  const flag = s.enemies.find((e) => e.kind === 'flagship');
+  if (!flag) return { pos: null, rammed: false };
+  if (stepNo === 2) return { pos: flag.pos, rammed: false };
+
+  const target = enemyIntent(flag.pos, s.player.pos, s.width);
+  if (target === s.player.pos) return { pos: flag.pos, rammed: true };
+  const terrain = s.terrain[target]!;
+  if (terrain === 'island') return { pos: flag.pos, rammed: false }; // 山挡不动
+  if (terrain === 'reef' || terrain === 'wreck') {
+    s.terrain[target] = 'water';
+    events.push({ type: 'terrainDestroyed', at: target, step: stepNo });
+  }
+  const from = flag.pos;
+  flag.pos = target;
+  flag.facing = dirFromTo(from, target, s.width);
+  events.push({ type: 'enemyMoved', shipId: flag.id, from, to: target, facing: flag.facing, step: stepNo });
+  return { pos: target, rammed: false };
+}
+
+/**
+ * 小船同时移动 + 冲突结算。返回是否有船撞进玩家格（扣命由 enemyPhase 统一处理）。
  * 两条引理保证正确性与确定性（tests/rules.test.ts 固化）：
- * 1. AI 每微步必动（贪心步恒存在）⇒ mover 原格必腾空，无阻塞链，免迭代；
+ * 1. 小船 AI 每微步必动（贪心步恒存在）⇒ mover 原格必腾空，无阻塞链，免迭代；
  * 2. 对穿是对称判定、同格冲突是按目标格分组的集合运算 ⇒ 结算与遍历序无关，
  *    无需 RNG 决胜；事件排列用 shipId 升序固定。
+ * 旗舰不在 mover 集合内：目标 = 旗舰最终格 → 全组只沉自己（collision），
+ * 旗舰无伤、不留残骸——该分支优先级在 stationary 检测之前。
  */
 function resolveEnemyStep(
   s: GameState,
   moverIds: number[],
   stepNo: 1 | 2,
   events: GameEvent[],
-  rng: Rng,
   ctx: TurnCtx,
-): void {
+  flagshipPos: number | null,
+): boolean {
   const movers = s.enemies.filter((e) => moverIds.includes(e.id));
-  if (movers.length === 0) return;
+  if (movers.length === 0) return false;
 
   const intent = new Map<number, number>();
-  for (const m of movers) intent.set(m.id, enemyIntent(m.pos, s.player.pos, s.width));
+  for (const m of movers) intent.set(m.id, intentFor(m, s.player.pos, s.terrain, s.width, s.height));
 
   const sunk = new Map<number, { cause: SinkCause; to: number }>();
   const wrecks: number[] = [];
@@ -255,13 +539,17 @@ function resolveEnemyStep(
   const moved = new Map<number, number>();
   for (const [target, group] of groups) {
     const terrain = s.terrain[target]!;
-    // 静止敌船：不在本微步 mover 集合中的存活敌船（仅 step2 会出现——普通海盗已停）
+    // 静止敌船：不在本微步 mover 集合中的存活小船（仅 step2 会出现——普通海盗已停）
     const stationary = s.enemies.find(
-      (e) => e.pos === target && !moverIdSet.has(e.id) && !sunk.has(e.id),
+      (e) =>
+        e.pos === target && e.kind !== 'flagship' && !moverIdSet.has(e.id) && !sunk.has(e.id),
     );
     if (target === s.player.pos) {
       for (const m of group) sunk.set(m.id, { cause: 'rammedPlayer', to: target });
       rammedPlayer = true;
+    } else if (flagshipPos !== null && target === flagshipPos) {
+      // 撞旗舰：只沉自己，旗舰无伤，不留残骸（优先于 stationary 检测）
+      for (const m of group) sunk.set(m.id, { cause: 'collision', to: target });
     } else if (terrain === 'island' || terrain === 'reef' || terrain === 'wreck') {
       for (const m of group) sunk.set(m.id, { cause: 'obstacle', to: target });
     } else if (terrain === 'vortex') {
@@ -293,7 +581,7 @@ function resolveEnemyStep(
   for (const id of [...sunk.keys()].sort((a, b) => a - b)) {
     const m = s.enemies.find((e) => e.id === id)!;
     const info = sunk.get(id)!;
-    const points = sinkPoints(info.cause);
+    const points = sinkPoints(info.cause, m.kind);
     ctx.scoreGain += points;
     events.push({
       type: 'shipSunk',
@@ -314,16 +602,5 @@ function resolveEnemyStep(
     events.push({ type: 'wreckCreated', at, step: stepNo });
   }
 
-  // (f) 撞玩家：每回合封顶扣 1 命；lives 归零则原地留着播死亡动画
-  if (rammedPlayer && !ctx.lifeLost) {
-    ctx.lifeLost = true;
-    s.lives--;
-    events.push({ type: 'playerHit', at: s.player.pos, livesLeft: s.lives });
-    if (s.lives > 0) {
-      const from = s.player.pos;
-      const dest = findSafeCell(s, rng);
-      events.push({ type: 'playerTeleported', from, to: dest });
-      s.player.pos = dest;
-    }
-  }
+  return rammedPlayer;
 }

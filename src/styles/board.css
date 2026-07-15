@@ -460,7 +460,6 @@
 }
 
 .imp-smoke {
-  animation-delay: var(--fxd, 0ms);
   position: absolute;
   left: 50%;
   top: 50%;
@@ -652,4 +651,35 @@
     translate: 0 calc(var(--cell) * -0.85);
     scale: 1;
   }
+}
+
+
+/* — 闪白（shipDamaged 可读反馈）— */
+.fx-flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  animation: fx-flash-burst 0.28s var(--ease) both;
+}
+
+@keyframes fx-flash-burst {
+  from { opacity: 0; }
+  40% { opacity: 0.55; }
+  to { opacity: 0; }
+}
+
+/* 旗舰舰旗（覆在船上方） */
+.ship-flag {
+  position: absolute;
+  left: 50%;
+  top: -16%;
+  width: 28%;
+  height: 28%;
+  margin-left: -14%;
+  z-index: 1;
+}
+.life-icon {
+  width: 16px;
+  height: 16px;
 }

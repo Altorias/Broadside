@@ -1,12 +1,8 @@
-// ===== 过关 / 游戏结束浮层 =====
+// ===== 过关 / 胜利 / 游戏结束浮层 =====
 import { levelClearBonus } from '../engine/score';
 import { loadBest } from '../game/storage';
 
-interface ClearedProps {
-  level: number;
-  score: number;
-  onNext: () => void;
-}
+interface ClearedProps { level: number; score: number; onNext: () => void; }
 
 export function LevelClearedOverlay({ level, score, onNext }: ClearedProps) {
   return (
@@ -25,11 +21,27 @@ export function LevelClearedOverlay({ level, score, onNext }: ClearedProps) {
   );
 }
 
-interface OverProps {
-  level: number;
-  score: number;
-  onNewRun: () => void;
-  onExit: () => void;
+interface OverProps { level: number; score: number; onNewRun: () => void; onExit: () => void; }
+
+export function VictoryOverlay({ level, score, onNewRun, onExit }: OverProps) {
+  const best = loadBest();
+  return (
+    <div className="overlay">
+      <div className="card overlay-card">
+        <h2>🏆 怒海霸主！</h2>
+        <p className="overlay-sub">
+          通关 {level}/15 层 · 总分 <b>{score}</b>
+        </p>
+        <p className="overlay-best">
+          {score >= best.bestScore ? '🏅 新纪录！' : `最高：${best.bestScore} 分 · ${best.rogueWins} 胜`}
+        </p>
+        <div className="overlay-actions">
+          <button className="btn btn-primary" onClick={onNewRun} autoFocus>再来一局</button>
+          <button className="btn" onClick={onExit}>返回菜单</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function GameOverOverlay({ level, score, onNewRun, onExit }: OverProps) {
@@ -47,12 +59,8 @@ export function GameOverOverlay({ level, score, onNewRun, onExit }: OverProps) {
           最高纪录：{Math.max(best.bestScore, score)} 分 · 第 {Math.max(best.bestLevel, level)} 关
         </p>
         <div className="overlay-actions">
-          <button className="btn btn-primary" onClick={onNewRun} autoFocus>
-            再来一局
-          </button>
-          <button className="btn" onClick={onExit}>
-            返回菜单
-          </button>
+          <button className="btn btn-primary" onClick={onNewRun} autoFocus>再来一局</button>
+          <button className="btn" onClick={onExit}>返回菜单</button>
         </div>
       </div>
     </div>
